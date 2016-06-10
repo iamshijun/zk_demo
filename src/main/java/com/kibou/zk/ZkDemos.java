@@ -10,22 +10,21 @@ import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.Watcher.Event.EventType;
-import org.apache.zookeeper.data.Stat;
 import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.Stat;
+
+import com.kibou.zk.util.ZookeeperClientFactory;
 
 public class ZkDemos {
 	
-	private static String connectString = "127.0.0.1:2181,127.0.0.1:2182,127.0.0.1:2183";
-	
 	public static void main(String[] args) throws Throwable {
-		int sessionTimeout = 6000;
-		
 //		Thread thread = new Thread(new ConfigurationWatcher());
 //		thread.start();
 		
 		ZooKeeper zk = null;
 		try{
-			zk = new ZooKeeper(connectString, sessionTimeout,null);
+			zk =  ZookeeperClientFactory.newZooKeeper(ZookeeperCfgConstants.CONNECTSTRING,
+					ZookeeperCfgConstants.SESSION_TIMEOUT);
 			
 			//Thread.sleep(5000);
 			//String data = "{\"time\":1,\"path\":\"F:/conf/AbleskyConfig.properties\"}";
@@ -54,7 +53,9 @@ public class ZkDemos {
 		private CountDownLatch countDownLatch;
 		
 		public  ConfigurationWatcher() throws IOException {
-			zk = new ZooKeeper(connectString, 6000, null);
+			zk =  ZookeeperClientFactory.newZooKeeper(ZookeeperCfgConstants.CONNECTSTRING,
+					ZookeeperCfgConstants.SESSION_TIMEOUT);
+			
 			countDownLatch = new CountDownLatch(1);
 		}
 		
