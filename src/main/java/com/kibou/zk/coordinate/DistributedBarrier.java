@@ -61,6 +61,7 @@ public class DistributedBarrier implements Watcher, StatCallback{
 			if(path.equals(znode)){
 				switch(type){
 					case NodeChildrenChanged:
+					case NodeDeleted:
 						doNotify(); break;
 					default:
 						try {
@@ -131,6 +132,7 @@ public class DistributedBarrier implements Watcher, StatCallback{
 						if(mySequence > sequence) count++;
 					}
 					
+					//FiXME
 					nodeWaitingFor = nodeNamePrefix + String.format("%0"+numLen+"d", mySequence+1);
 					zk.exists(nodeWaitingFor, true, this, null);
 					
@@ -140,6 +142,7 @@ public class DistributedBarrier implements Watcher, StatCallback{
 						wait();
 					}
 				} catch (KeeperException | InterruptedException e) {
+					//NoNodeException : ParentNode was deleted or ...
 					e.printStackTrace();
 					broken = true;
 				}
