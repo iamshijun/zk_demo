@@ -5,6 +5,8 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import com.kibou.zk.ex.DistributedLockObtainException;
+
 public class ZkSimpleLockTest implements Runnable{
 
 	public static void main(String[] args) {
@@ -18,11 +20,11 @@ public class ZkSimpleLockTest implements Runnable{
 		Thread[] threads = new Thread[threadCount];
 		for(int i = 0; i < threadCount; ++i){
 //			threads[i] = new ZkCli(cb,10000);
-//			threads[i] = new ZkCliWorker(cb,5);
+			threads[i] = new ZkCliWorker(cb,100,new DistributedNonFairLock());
 //			threads[i] = new ZkCliSmartWorker(cb, 5);
 			
 //			threads[i] = new ZkCliWorker(cb,1,new DistributedFairLock());
-			threads[i] = new ZkCliSmartWorker(cb,1,new DistributedFairLock());
+//			threads[i] = new ZkCliSmartWorker(cb,1,new DistributedFairLock());
 			threads[i].start();
 		}
 		
@@ -59,15 +61,11 @@ public class ZkSimpleLockTest implements Runnable{
 		public void run() {
 			try {
 				cycliBarrier.await();
-			} catch (InterruptedException | BrokenBarrierException e) {
-				e.printStackTrace();
-				return;
-			}
-			try {
 				doWork();
+			} catch (BrokenBarrierException e) {
+				e.printStackTrace();
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
-				return;
 			}
 		}
 		protected void doWork() throws InterruptedException{
@@ -91,12 +89,17 @@ public class ZkSimpleLockTest implements Runnable{
 		}
 		
 		protected void doWork() throws InterruptedException{
+			ThreadLocalRandom threadLocalRandom = ThreadLocalRandom.current();
 			for(int i = 0; i < retriveCnt; ++i){
 				try {
+					//Thread.sleep(500);
+					Thread.sleep(threadLocalRandom.nextInt(200, 1000));
 					disSimpleLock.lock();
-					//Thread.sleep(1000);
 					competition++;
-				} finally{
+				}catch(DistributedLockObtainException e){
+					e.printStackTrace();//continue;
+					i--;
+				}finally{
 					disSimpleLock.unlock();
 				}
 			}

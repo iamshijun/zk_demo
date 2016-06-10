@@ -7,6 +7,7 @@ import java.util.concurrent.locks.Condition;
 import org.apache.zookeeper.AsyncCallback.VoidCallback;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.KeeperException.ConnectionLossException;
 import org.apache.zookeeper.KeeperException.NodeExistsException;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
@@ -41,7 +42,7 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 	final int unusable = 1;//just like pause waiting for resume( SyncConnect? reconnect) 
 	
 //	private int state = 0;
-	
+//	private CountDownLatch connectionDoneCdl = new CountDownLatch(1);
 	public DistributedNonFairLock() {
 		this(defaultZnode);
 	}
@@ -54,33 +55,42 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 					ZookeeperCfgConstants.CONNECTSTRING,
 					ZookeeperCfgConstants.SESSION_TIMEOUT,
 					this);
-		} catch (IOException  e) {
+//			connectionDoneCdl.await();
+			zk.exists(znode, true);
+		} catch (IOException | KeeperException | InterruptedException  e) {
 			throw new DistributedLockObtainException(e);
 		}
 	}
 	
 	@Override
 	public void process(WatchedEvent event) {
-		EventType type = event.getType();
-		if(znode.equals(event.getPath())){
-			switch (type) {
-				case NodeDeleted:
-					doNotify();	break;
-				default:		break;
-			}
-		}else{
-			logger.debug(event.toString());
-		}
-		//re-register this
 		if(!destroy){
-			try {
-				zk.exists(znode, true);
-			} catch (KeeperException | InterruptedException e) { //loss conection....
-				if(e instanceof KeeperException){
-					//state = 
+			EventType type = event.getType();
+			if(znode.equals(event.getPath())){
+				switch (type) {
+					case NodeDeleted:
+						doNotify();	
+						break;
+					default:
+						break;
 				}
-				doNotify();
-				e.printStackTrace();
+				//re-register this,cause notify does not mean you can 100% get the lock; 
+				try {
+					zk.exists(znode, true);
+					/*zk.exists(znode, true, new StatCallback(){}, null);*/
+				} catch (KeeperException | InterruptedException e) { //ConnectionLossException
+					if(e instanceof ConnectionLossException){//server clapses?
+						if(destroy){} //can suppress, 锁线程关闭了连接过程中, zk线程仍可能收到事件响应,但这时这情况可以忽略
+						//wait for reconnect ? or detroy the lock!
+					}//state = .. 
+					doNotify();
+					e.printStackTrace();
+				}
+			}else{
+				/*if(event.getState() == KeeperState.SyncConnected){
+					connectionDoneCdl.countDown();
+				}*/
+				logger.debug(event.toString());
 			}
 		}
 	}
@@ -90,13 +100,35 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 			notify();
 		}
 	}
+	/*private boolean doWait(){
+		synchronized (this) {
+			try {
+				wait();
+			} catch (InterruptedException e) {
+				return true;
+			}
+		}
+		return false;
+	}*/
 	
-	private boolean tryAcquire() throws KeeperException, InterruptedException {//doCreateLockNode
+	private boolean tryAcquire() {//doCreateLockNode
+		try{
 		//TODo : in product env we should use IP/Hostname instead of the time/epoch
-		String data = String.valueOf(System.nanoTime());
-		zk.create(znode, data.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
-		logger.debug("get lock");
-		return true;
+			byte[] addr = Thread.currentThread().getName().getBytes();//byte[] addr = InetAddress.getLocalHost().getAddress();
+			
+			/*byte[] lockHolder = zk.getData(znode, true, null);
+			if(lockHolder != null){
+				return Arrays.equals(addr, lockHolder);
+			}*/
+			
+			zk.create(znode, addr, Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
+			logger.debug("get lock");
+			return true;
+		}catch(NodeExistsException | InterruptedException e){
+			return false;
+		}catch(KeeperException e){
+			throw new DistributedLockObtainException(e);
+		}
 	}
 	
 	private void checkIfDestroyAlready() {
@@ -113,17 +145,12 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 	public void lockInterruptibly() throws InterruptedException {
 		checkIfDestroyAlready();
 		
-		synchronized(this){
-			while(!destroy){
-				try {
-					tryAcquire();
+		while(!destroy){
+			synchronized(this){
+				if(tryAcquire()){
 					return;
-				} catch (KeeperException e) {
-					if(e instanceof NodeExistsException){
-						wait();
-					}else{ //session timeout .....
-						throw new DistributedLockObtainException(e);
-					}
+				}else{
+					wait();
 				}
 			}
 		}
@@ -134,17 +161,11 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 	public boolean tryLock() {
 		checkIfDestroyAlready();
 		
-		while(!destroy){
-			try { 
-				tryAcquire();
-				return true;
-			} catch (KeeperException | InterruptedException e) {
-				if(e instanceof NodeExistsException){
-					return false;
-				}
-			}
+		try { 
+			return tryAcquire();
+		} catch (DistributedLockObtainException e) {
+			return false;
 		}
-		return false;
 	}
 	
 	@Override
@@ -158,43 +179,30 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 				long left = timeout - (System.nanoTime() - start);
 				if(left <= 0)
 					break;
-				try {
-					return tryAcquire();
-				} catch (KeeperException e) {
-					if(e instanceof NodeExistsException){//Ops...,bad luck,wait again please
-						wait(TimeUnit.MILLISECONDS.convert(left, TimeUnit.NANOSECONDS));
-					}
-					else{ //session timeout ..... TODo:set state
-						throw new DistributedLockObtainException(e); 
-						//what shold i do when a unexpectable KeeperException occured
-					}
+				
+				if(tryAcquire())
+					return true;
+				else{
+					wait(TimeUnit.MILLISECONDS.convert(left, TimeUnit.NANOSECONDS));
 				}
 			}
 		}
 		return false;
 	}
 	
-	public void lock(){ //uninterruptable
+	public void lock() throws DistributedLockObtainException { //uninterruptable
 		checkIfDestroyAlready();
 		
 		boolean isInterrupted = false;
-		synchronized(this){
-			while(!destroy){
-				try {
-					tryAcquire();
+		while(!destroy){
+			synchronized(this){
+				if(tryAcquire())
 					return;
-				} catch (InterruptedException e) {
-					isInterrupted = true;
-				} catch (KeeperException e) {
-					if(e instanceof NodeExistsException){
-						try {
-							wait();
-						} catch (InterruptedException e1) {
-							isInterrupted = true;
-						}
-					}
-					else{ //session timeout .....
-						throw new DistributedLockObtainException(e);
+				else{
+					try{
+						wait();
+					} catch (InterruptedException e1) {
+						isInterrupted = true;
 					}
 				}
 			}
@@ -212,13 +220,6 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 
 	@Override
 	public void processResult(int rc, String path, Object ctx) {
-		/*switch(Code.get(rc)){
-			case :
-				break;
-			default:
-				break;
-		}*/
-		//System.out.println(Code.get(rc));
 	}
 	
 	
