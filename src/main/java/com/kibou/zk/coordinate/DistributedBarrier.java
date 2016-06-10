@@ -113,15 +113,20 @@ public class DistributedBarrier implements Watcher, StatCallback{
 	}*/
 	
 	public int await() throws BrokenBarrierException{
+		String createdPath = nodeCreated;
+		if(createdPath == null || createdPath.length() == 0 ){
+			String data = String.valueOf(System.nanoTime());
+			try {
+				createdPath = zk.create(nodeName, data.getBytes(), Ids.OPEN_ACL_UNSAFE,
+						CreateMode.EPHEMERAL_SEQUENTIAL);
+			} catch (KeeperException | InterruptedException e) {
+				throw new DistributedBarrierException(e);
+			}
+		}
+		
 		while(!broken){
 			synchronized (this) {
 				try {
-					String createdPath = nodeCreated;
-					if(createdPath == null || createdPath.length() == 0 ){
-						String data = String.valueOf(System.nanoTime());
-						createdPath = zk.create(nodeName, data.getBytes(), Ids.OPEN_ACL_UNSAFE,
-							CreateMode.EPHEMERAL_SEQUENTIAL);
-					}
 	
 					int mySequence = getPathSeq(createdPath,nodeNamePrefix);
 					int numLen = createdPath.length() - nodeNamePrefix.length();
