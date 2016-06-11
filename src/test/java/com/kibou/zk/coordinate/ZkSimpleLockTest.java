@@ -4,55 +4,147 @@ import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TestName;
 
 import com.kibou.zk.ex.DistributedLockObtainException;
 
-public class ZkSimpleLockTest implements Runnable{
-
-	public static void main(String[] args) {
-		new ZkSimpleLockTest().run();
+public class ZkSimpleLockTest {
+	
+	private interface ThreadFactory{
+		/**
+		 * @param cb
+		 * 		make sure they work just parallel-like;
+		 * @param workLoop
+		 * 		after work 'workLoop' times , return
+		 * @param args
+		 * @return
+		 */
+		public Thread newThread(CyclicBarrier cb,int workLoop,Object... args);
 	}
 	
-	public void run(){
+	private interface TestCallback{
+		public void beforeStart();
+		public void afterCompletion();
+		
+		public TestCallback DEFAULT = new TestCallback() {
+			public void beforeStart() {}
+			public void afterCompletion() {}
+		};
+	}
+	private TestCallback defaultTestCallback = new TestCallback() {
+		public void beforeStart() {}
+		public void afterCompletion() {
+			System.out.println("[" + testName.getMethodName() + "] competition = " + safeCompetition.get());
+		}
+	};
+	
+	@Rule
+	public TestName testName = new TestName();
+	
+	@Before
+	public void setUP(){
+		safeCompetition.set(0);
+	}
+	
+	public void testTemplate(ThreadFactory threadFactory,int workLoop,Object... args){
+		testTemplate(threadFactory, workLoop, defaultTestCallback, args);
+	}
+	
+	public void testTemplate(ThreadFactory threadFactory,int workLoop,TestCallback testCallback,Object... args){
+		if(testCallback == null){
+			testCallback = TestCallback.DEFAULT;
+		}
+		
 		int threadCount = 5;
 		CyclicBarrier cb = new CyclicBarrier(threadCount + 1);
 		
 		Thread[] threads = new Thread[threadCount];
 		for(int i = 0; i < threadCount; ++i){
-//			threads[i] = new ZkCli(cb,10000);
-			threads[i] = new ZkCliWorker(cb,100,new DistributedNonFairLock());
-//			threads[i] = new ZkCliSmartWorker(cb, 5);
-			
-//			threads[i] = new ZkCliWorker(cb,1,new DistributedFairLock());
-//			threads[i] = new ZkCliSmartWorker(cb,1,new DistributedFairLock());
+			threads[i] = threadFactory.newThread(cb,workLoop,args);
 			threads[i].start();
 		}
 		
 		try {
 			cb.await();
-		} catch (InterruptedException | BrokenBarrierException e) {
-			e.printStackTrace();
-		}
-		
-		try {
+			
 			for (int i = 0; i < threadCount; ++i) {
 				threads[i].join();
 			}
-			System.out.println(competition);
-		} catch (InterruptedException e) {
+			
+			testCallback.afterCompletion();
+		} catch (InterruptedException | BrokenBarrierException e) {
 			e.printStackTrace();
+			Assert.fail();
 		}
 	}
-
-	private int competition = 0;
 	
-	class ThreadUnsafeWorker extends Thread {
+	@Test
+	public void testWithoutZK(){
+		testTemplate(new ThreadFactory() {
+			@Override
+			public Thread newThread(CyclicBarrier cb, int workLoop, Object... args) {
+				return new Worker(cb, workLoop);
+			}
+		},100);
+	}
+	
+	@Test
+	public void testZkCliWorkerWithNonfaiLock(){
+		testTemplate(new ThreadFactory() {
+			@Override
+			public Thread newThread(CyclicBarrier cb, int workLoop, Object... args) {
+				return new ZkCliWorker(cb, workLoop/*,new DistributedNonFairLock()*/);
+			}
+		},10);
+	}
+	
+	@Test
+	public void testZkCliSmartWorkerWithNonfaiLock(){
+		testTemplate(new ThreadFactory() {
+			@Override
+			public Thread newThread(CyclicBarrier cb, int workLoop, Object... args) {
+				return new ZkCliSmartWorker(cb, workLoop/*,new DistributedNonFairLock()*/);
+			}
+		},5);
+	}
+	
+	@Test
+	public void testZkCliWorkerWithFaiLock(){
+		testTemplate(new ThreadFactory() {
+			@Override
+			public Thread newThread(CyclicBarrier cb, int workLoop, Object... args) {
+				return new ZkCliWorker(cb, workLoop, new DistributedFairLock());
+			}
+		},5);
+	}
+	
+	@Test
+	public void testZkCliSmartWorkerWithFaiLock(){
+		testTemplate(new ThreadFactory() {
+			@Override
+			public Thread newThread(CyclicBarrier cb, int workLoop, Object... args) {
+				return new ZkCliSmartWorker(cb, workLoop, new DistributedFairLock());
+			}
+		},5);
+	}
+	
+
+	private AtomicInteger safeCompetition = new AtomicInteger(0);
+//	private int competition = 0;
+	
+	class Worker extends Thread {
 		//ps : 其实是competition不是threadsafe,请注意threadsafe最佳实践是封装! (将java并发编程实战)
 		
 		final int retriveCnt;
 		final CyclicBarrier cycliBarrier;
 		
-		public ThreadUnsafeWorker(CyclicBarrier cycliBarrier,int retriveCnt) {
+		public Worker(CyclicBarrier cycliBarrier,int retriveCnt) {
 			this.cycliBarrier = cycliBarrier;
 			this.retriveCnt = retriveCnt;
 		}
@@ -70,12 +162,13 @@ public class ZkSimpleLockTest implements Runnable{
 		}
 		protected void doWork() throws InterruptedException{
 			for(int i = 0; i < retriveCnt; ++i){
-				competition++;
+				//competition++;
+				safeCompetition.incrementAndGet();
 			}
 		}
 	}
 	
-	class ZkCliWorker extends ThreadUnsafeWorker {
+	class ZkCliWorker extends Worker {
 
 		protected DistributedLock disSimpleLock;
 		
@@ -95,7 +188,7 @@ public class ZkSimpleLockTest implements Runnable{
 					//Thread.sleep(500);
 					Thread.sleep(threadLocalRandom.nextInt(200, 1000));
 					disSimpleLock.lock();
-					competition++;
+					safeCompetition.incrementAndGet();
 				}catch(DistributedLockObtainException e){
 					e.printStackTrace();//continue;
 					i--;
@@ -127,7 +220,7 @@ public class ZkSimpleLockTest implements Runnable{
 				}
 				try {
 					Thread.sleep(threadLocalRandom.nextInt(1000, 3000));
-					competition++;
+					safeCompetition.incrementAndGet();
 				} finally{
 					disSimpleLock.unlock();
 				}

@@ -29,28 +29,25 @@ public class DistributedFairLock implements Watcher, VoidCallback, DistributedLo
 	private static String defaultZnode = "/lock/fairLock"; //default
 	
 	private final ZooKeeper zk;
-	private final String znode;
+	private final String zparentNode;
 	
 	private final String nodeName = "dfl";
-	private String nodeNamePrefix;
+	private String zpath;
 
 	private boolean destroy = false;
 	
 	private String nodeCreated = ""; // currentNode , use by lock,unlock cannot seen by zk thread
 	
 	public DistributedFairLock() {
-		this(defaultZnode);
+		this(defaultZnode, ZookeeperCfgConstants.CONNECTSTRING, ZookeeperCfgConstants.SESSION_TIMEOUT);
 	}
 	
-	public DistributedFairLock(String znode) {
-		assert znode != null;
-		this.znode = znode;
-		this.nodeNamePrefix = znode + "/" + nodeName;
+	public DistributedFairLock(String zparentPath, String connectString, int sessionTimeout) {
+		assert zparentPath != null;
+		this.zparentNode = zparentPath;
+		this.zpath = zparentPath + "/" + nodeName;
 		try {
-			zk = ZookeeperClientFactory.newZooKeeper(
-					ZookeeperCfgConstants.CONNECTSTRING,
-					ZookeeperCfgConstants.SESSION_TIMEOUT,
-					this);
+			zk = ZookeeperClientFactory.newZooKeeper(connectString, sessionTimeout, this);
 		} catch (IOException  e) {
 			throw new DistributedLockObtainException(e);
 		}
@@ -59,14 +56,14 @@ public class DistributedFairLock implements Watcher, VoidCallback, DistributedLo
 	@Override
 	public void process(WatchedEvent event) {
 		String path = event.getPath();
-		if(path != null && path.equals(znode)){
+		if(path != null && path.equals(zparentNode)){
 			EventType eventType = event.getType();
 			switch (eventType){
 				case NodeChildrenChanged:
 					doNotify(); break;
 				default:
 					try {
-						zk.exists(znode, true);
+						zk.exists(zparentNode, true);
 						logger.debug("Got event : " + event.getType());
 					} catch (KeeperException | InterruptedException e) {
 						doNotify(); 	
@@ -146,13 +143,13 @@ public class DistributedFairLock implements Watcher, VoidCallback, DistributedLo
 		if(createdPath == null || createdPath.length() == 0){
 			String data = String.valueOf(System.nanoTime());
 			//byte[] addr = InetAddress.getLocalHost().getAddress(); 
-			nodeCreated = createdPath = zk.create(nodeNamePrefix, data.getBytes() , 
+			createdPath = nodeCreated = zk.create(zpath, data.getBytes() , 
 					Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
 		}//else create before
 		
-		int mySequence = getPathSeq(createdPath,nodeNamePrefix);
+		int mySequence = getPathSeq(createdPath,zpath);
 		int maxSeqButLessThanMe = Integer.MIN_VALUE;
-		List<String> children = zk.getChildren(znode, true);//true is important 
+		List<String> children = zk.getChildren(zparentNode, true);//true is important 
 		//we also must observe this event.in case when we get the stale children list  
 		for(String child : children){
 			int sequence = getPathSeq(child,nodeName);

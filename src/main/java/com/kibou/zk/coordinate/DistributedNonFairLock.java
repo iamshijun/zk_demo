@@ -34,7 +34,7 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 	private final ZooKeeper zk;
 	private final String znode;
 
-	private boolean destroy = false;
+	private volatile boolean destroy = false;
 	
 	//all states
 	final int destroyed = -1; 
@@ -44,17 +44,14 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 //	private int state = 0;
 //	private CountDownLatch connectionDoneCdl = new CountDownLatch(1);
 	public DistributedNonFairLock() {
-		this(defaultZnode);
+		this(defaultZnode, ZookeeperCfgConstants.CONNECTSTRING, ZookeeperCfgConstants.SESSION_TIMEOUT);
 	}
 	
-	public DistributedNonFairLock(String znode) {
+	public DistributedNonFairLock(String znode,String connectString,int sessionTimeout) {
 		assert znode != null;
 		this.znode = znode;
 		try {
-			zk = ZookeeperClientFactory.newZooKeeper(
-					ZookeeperCfgConstants.CONNECTSTRING,
-					ZookeeperCfgConstants.SESSION_TIMEOUT,
-					this);
+			zk = ZookeeperClientFactory.newZooKeeper(connectString, sessionTimeout, this);
 //			connectionDoneCdl.await();
 			zk.exists(znode, true);
 		} catch (IOException | KeeperException | InterruptedException  e) {
@@ -64,34 +61,34 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 	
 	@Override
 	public void process(WatchedEvent event) {
-		if(!destroy){
-			EventType type = event.getType();
-			if(znode.equals(event.getPath())){
-				switch (type) {
-					case NodeDeleted:
-						doNotify();	
-						break;
-					default:
-						break;
-				}
-				//re-register this,cause notify does not mean you can 100% get the lock; 
-				try {
-					zk.exists(znode, true);
-					/*zk.exists(znode, true, new StatCallback(){}, null);*/
-				} catch (KeeperException | InterruptedException e) { //ConnectionLossException
-					if(e instanceof ConnectionLossException){//server clapses?
-						if(destroy){} //can suppress, 锁线程关闭了连接过程中, zk线程仍可能收到事件响应,但这时这情况可以忽略
-						//wait for reconnect ? or detroy the lock!
-					}//state = .. 
-					doNotify();
-					e.printStackTrace();
-				}
-			}else{
-				/*if(event.getState() == KeeperState.SyncConnected){
-					connectionDoneCdl.countDown();
-				}*/
-				logger.debug(event.toString());
+		if(destroy)
+			return;
+		EventType type = event.getType();
+		if(znode.equals(event.getPath())){
+			switch (type) {
+				case NodeDeleted:
+					doNotify();	
+					break;
+				default:
+					break;
 			}
+			//re-register this,cause notify does not mean you can 100% get the lock; 
+			try {//因为tryAcquire中 只有单纯的试create,并没有重新注册事件,所以这里在switch-case外重新注册监听
+				zk.exists(znode, true);
+				/*zk.exists(znode, true, new StatCallback(){}, null);*/
+			} catch (KeeperException | InterruptedException e) { //ConnectionLossException
+				if(e instanceof ConnectionLossException){//server clapses?
+					if(destroy){} //can suppress, 锁线程关闭了连接过程(destroy())中, zk线程仍可能收到事件响应,但这时这情况可以忽略
+					//wait for reconnect ? or detroy the lock!
+				}//state = .. 
+				doNotify();
+				e.printStackTrace();
+			}
+		}else{
+			/*if(event.getState() == KeeperState.SyncConnected){
+				connectionDoneCdl.countDown();
+			}*/
+			logger.debug(event.toString());
 		}
 	}
 	
