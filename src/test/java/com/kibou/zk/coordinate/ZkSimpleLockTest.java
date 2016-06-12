@@ -28,17 +28,9 @@ public class ZkSimpleLockTest {
 		public Thread newThread(CyclicBarrier cb,int workLoop,Object... args);
 	}
 	
-	private interface TestCallback{
-		public void beforeStart();
-		public void afterCompletion();
-		
-		public TestCallback DEFAULT = new TestCallback() {
-			public void beforeStart() {}
-			public void afterCompletion() {}
-		};
-	}
 	private TestCallback defaultTestCallback = new TestCallback() {
 		public void beforeStart() {}
+		public void beforeCompletion(){}
 		public void afterCompletion() {
 			System.out.println("[" + testName.getMethodName() + "] competition = " + safeCompetition.get());
 		}
