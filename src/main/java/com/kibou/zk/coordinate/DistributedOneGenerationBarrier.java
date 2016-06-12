@@ -5,16 +5,15 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import org.apache.zookeeper.AsyncCallback.StatCallback;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.KeeperException.ConnectionLossException;
-import org.apache.zookeeper.KeeperException.NoNodeException;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
-import org.apache.zookeeper.Watcher.Event.EventType;
 import org.apache.zookeeper.ZooDefs.Ids;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.data.Stat;
@@ -27,8 +26,8 @@ import com.kibou.zk.ex.DistributedBarrierException;
 import com.kibou.zk.util.ZookeeperClientFactory;
 
 /**
- * v2. 需要总协调者将传入的指定path创建好,或者说是reset (data清空)/或者是整个path删除后创建
- * 需要保证里面没有任何的child和data不为"start"最后是空值
+ * 需要总协调者将传入的指定path创建好,或者说是reset (data清空)/或者是整个path删除后创建
+ * 需要保证里面没有任何的child和data不为"start"最好是空值,
  */
 public class DistributedOneGenerationBarrier implements Watcher, StatCallback, DistributedBarrier{
 	
@@ -41,16 +40,36 @@ public class DistributedOneGenerationBarrier implements Watcher, StatCallback, D
 	
 	private final String nodeName = "barrier";
 	private final String zpath;
-	private final byte[] startbytes = "start".getBytes(); 
 	
-	private volatile String nodeCreated ="";
+	private final byte[] startbytes = "start".getBytes(); 
+	private final byte[] destroybytes = "destroy".getBytes(); 
+	
+	private String nodeCreated ="";
+	
+	private volatile String prevNodeWaitingFor = "";
+	private volatile String nextNodeWaitingFor = "";
 	
 	/*private Generation generation;
 	private static class Generation {
 	}*/
 	
-	private volatile boolean broken = false;
-	private volatile boolean destroy = false;
+	private volatile int state = 0;
+	private final static int allReach = 1;
+	private final static int broken = -1;
+	private final static int destroy = -2;
+	
+	
+	private void breakBarrier(){ state = broken; 		}
+	private void setAllReach()    { state = allReach;	}
+	private void setDestroy()    { state = destroy;	}
+	
+	private boolean isAllReach(){ return state == allReach;	}
+	private boolean isBroken() {return state == broken; }
+	private boolean isDestroy(){ return state == destroy;}
+	
+	//private boolean isUsable(){ return state != broken && state != destroy;};
+	
+//	private Thread exclusiveOwnerThread;
 	
 	/**
 	 * @param zparentNode
@@ -73,30 +92,44 @@ public class DistributedOneGenerationBarrier implements Watcher, StatCallback, D
 	
 	@Override
 	public void process(WatchedEvent event) {
-		if(destroy)
+		if(isDestroy())
 			return;
 		
-		EventType type = event.getType();
-		String path = event.getPath();
-		if(path != null && path.equals(zparentPath)){
-			logger.debug(event.toString());
-			switch(type){
-				case NodeChildrenChanged:
-				case NodeDeleted:
-				case NodeDataChanged:
-					doNotify(); break;
-				default:
-					try {
-						zk.getChildren(zparentPath, true);
-					} catch (KeeperException | InterruptedException e) {
-						if(ConnectionLossException.class.isInstance(e)){}
-						doNotify();
-						e.printStackTrace();
-					}
-					break;
+		logger.trace(event.toString());
+		try{
+			if(zparentPath.equals(event.getPath())){
+				switch(event.getType()){
+					case NodeDeleted:
+						breakBarrier();
+						doNotify(); 
+						break;
+					default:
+						byte[] data = zk.getData(zparentPath, true, null);
+						if(data != null && Arrays.equals(startbytes, data)){
+							setAllReach();
+							doNotify();
+						}
+						break;
+				}
+			}else if(nextNodeWaitingFor.equals(event.getPath())
+					|| prevNodeWaitingFor.equals(event.getPath())){
+				Stat stat = zk.exists(event.getPath(), true);
+				if(stat == null){
+					breakBarrier();
+					doNotify();
+					
+					zk.setData(zpath, destroybytes, -1, this, null);
+				}
+			}else{
+				//path == null && SyncConnect event
+				//logger.debug(event.toString());
 			}
-		}else{
-			logger.debug(event.toString());
+		} catch (KeeperException | InterruptedException e) {
+			if(ConnectionLossException.class.isInstance(e)){
+				breakBarrier();
+			}
+			doNotify();
+			e.printStackTrace();
 		}
 	}
 	
@@ -104,10 +137,6 @@ public class DistributedOneGenerationBarrier implements Watcher, StatCallback, D
 		synchronized(this){
 			notify();
 		}
-	}
-	
-	private void breakBarrier(){
-		broken = true;
 	}
 	
 	private List<Integer> getNodeSequences(List<String> children){
@@ -128,71 +157,46 @@ public class DistributedOneGenerationBarrier implements Watcher, StatCallback, D
 		return false;
 	}
 	
-	private int myIndex = -1 ;
-	
-	public int await(long timeount,TimeUnit unit) 
-			throws InterruptedException, BrokenDistributedBarrierException, DistributedBarrierException{
-		return -1;
+	public int await(long time,TimeUnit unit) 
+			throws InterruptedException, BrokenDistributedBarrierException, TimeoutException, DistributedBarrierException{
+		
+		if(!isBroken()){
+			int myIndex = init();
+			
+			final long start = System.nanoTime();
+			final long timeout = TimeUnit.NANOSECONDS.convert(time, unit);
+			
+			for(;;){
+				long left = timeout - (System.nanoTime() - start);
+				if(left <= 0 ){
+					zk.setData(zpath, destroybytes, -1, this, null);//best effor
+					throw new TimeoutException();
+				}
+				synchronized (this) {
+					if(isAllReach())
+						return myIndex;
+					if(isBroken())
+						break;
+					logger.trace("wait");
+					
+					wait(TimeUnit.MILLISECONDS.convert(left, TimeUnit.NANOSECONDS));
+				}
+			}
+		}
+		
+		throw new BrokenDistributedBarrierException();
 	}
 	
 	public int await()
 			throws InterruptedException, BrokenDistributedBarrierException, DistributedBarrierException{
-		if(!broken){
-			
-			String createdPath = nodeCreated;
-			if(createdPath == null || createdPath.length() == 0 ){
-				String data = String.valueOf(System.nanoTime());
-				try {
-					createdPath = nodeCreated = zk.create(zpath, data.getBytes(), Ids.OPEN_ACL_UNSAFE,
-							CreateMode.EPHEMERAL_SEQUENTIAL);
-				} catch (KeeperException | InterruptedException e) {
-					throw new DistributedBarrierException(e);
-				}
-			}
-			
-			for(;!broken;){
+		if(!isBroken()){
+			int myIndex = init();
+			for(;;){
 				synchronized (this) {
-					try {
-	
-						//int numLen = createdPath.length() - zpath.length();
-						if(myIndex == -1){
-							myIndex = 0;
-							//check where am i
-							List<Integer> nodeSequences = getNodeSequences(zk.getChildren(zparentPath, true));
-							int mySequence = ZookeeperHelper.getPathSeq(createdPath,zpath);
-							for(int sequence : nodeSequences){
-								if(mySequence > sequence) myIndex++;
-							}
-							if(myIndex == parties - 1){
-								zk.setData(zparentPath, startbytes, -1);
-								logger.trace("i am the last one");
-								return myIndex;
-							}
-						}else{
-							byte[] data = zk.getData(zparentPath, true, null);
-							logger.debug(new String(data));
-							if(data != null && Arrays.equals(startbytes, data)){
-								return myIndex;
-							}
-							
-							/* in case some one broken*/
-							/*
-							List<Integer> nodeSequences = getNodeSequences(zk.getChildren(zparentPath, true));
-							System.out.println(nodeSequences);
-							if(checkBarrierIsBroken(nodeSequences))
-								break;*/
-						}
-						/*if(myIndex >= parties){return myIndex; //hey guy,you may not belong to this barrier}*/
-						
-					} catch (KeeperException | InterruptedException e) {
-						if(e instanceof NoNodeException){
-							//NoNodeException : ParentNode was deleted or ...
-						}else{
-						}
-						e.printStackTrace();
-						breakBarrier();
+					if(isAllReach())
+						return myIndex;
+					if(isBroken())
 						break;
-					}
 					logger.trace("wait");
 					this.wait();
 				}
@@ -201,11 +205,55 @@ public class DistributedOneGenerationBarrier implements Watcher, StatCallback, D
 		
 		throw new BrokenDistributedBarrierException();
 	}
+	private int init() throws BrokenDistributedBarrierException {
+		try{
+			int myIndex = -1;
+			//1. create -s -e node 
+			nodeCreated = zk.create(zpath, String.valueOf(System.nanoTime()).getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
+			
+			//2. check where am i
+			int mySequence = ZookeeperHelper.getPathSeq(nodeCreated, zpath);
+			List<Integer> nodeSequences = getNodeSequences(zk.getChildren(zparentPath, false));
+			for(int sequence : nodeSequences){
+				if(mySequence > sequence) myIndex++;
+			}
+			
+			//3. setup flag /checkout flag
+			if(myIndex == parties - 1){
+				logger.trace("i am the last one");
+				zk.setData(zparentPath, startbytes, -1);//set 'start' flag
+				return myIndex;
+			}
+			//4. check if started or destroyed 
+			byte[] data = zk.getData(zparentPath, true, null);
+			//logger.trace(new String(data));
+			if(data != null){
+				if(Arrays.equals(startbytes, data))
+					return myIndex;
+				if(Arrays.equals(destroybytes, data)){
+					breakBarrier();
+					throw new BrokenDistributedBarrierException();
+				}
+			}
+			
+			//5. waiting for prev & next node
+			nextNodeWaitingFor = zpath + String.format("%0" + (nodeCreated.length() - zpath.length()) + "d", mySequence + 1);
+			zk.exists(nextNodeWaitingFor, true, this, null);
+			if(myIndex != 0){
+				prevNodeWaitingFor = zpath + String.format("%0" + (nodeCreated.length() - zpath.length()) + "d", mySequence -1);
+				zk.exists(prevNodeWaitingFor, true, this, null);
+			}
+			return myIndex;
+		} catch (KeeperException | InterruptedException e) {
+			leave();
+			throw new DistributedBarrierException(e);
+		}
+	}
 	
 	public void destroy(){
-		destroy = true;
 		logger.debug("destroy");
-		breakBarrier();
+		
+		setDestroy();
 		try {
 			zk.close();
 		} catch (InterruptedException e) {
@@ -213,9 +261,10 @@ public class DistributedOneGenerationBarrier implements Watcher, StatCallback, D
 		}
 	}
 	
-	/*private void release(){
-		logger.debug("release");
-		if(broken)
+	public void leave(){
+		logger.debug("leave");
+		
+		if(nodeCreated == null || nodeCreated.length() == 0)
 			return;
 		
 		breakBarrier();
@@ -224,14 +273,14 @@ public class DistributedOneGenerationBarrier implements Watcher, StatCallback, D
 		} catch (KeeperException | InterruptedException e) {
 			e.printStackTrace();
 		}
-	}*/
+	}
 	
 	@Override
 	public void processResult(int rc, String path, Object ctx, Stat stat) {
 		switch(Code.get(rc)){
 			case SESSIONEXPIRED:
 			case CONNECTIONLOSS:
-				System.out.println(rc);
+				logger.debug("processResult rc : {}" ,rc);
 				break;
 			default : 
 				break;
