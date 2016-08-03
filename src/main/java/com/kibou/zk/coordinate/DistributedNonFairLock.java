@@ -144,11 +144,10 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 		
 		while(!destroy){
 			synchronized(this){
-				if(tryAcquire()){
+				if(tryAcquire())
 					return;
-				}else{
-					wait();
-				}
+				
+				wait();
 			}
 		}
 		
@@ -179,9 +178,8 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 				
 				if(tryAcquire())
 					return true;
-				else{
-					wait(TimeUnit.MILLISECONDS.convert(left, TimeUnit.NANOSECONDS));
-				}
+				
+				wait(TimeUnit.MILLISECONDS.convert(left, TimeUnit.NANOSECONDS));
 			}
 		}
 		return false;
@@ -195,12 +193,11 @@ public class DistributedNonFairLock implements Watcher, VoidCallback, Distribute
 			synchronized(this){
 				if(tryAcquire())
 					return;
-				else{
-					try{
-						wait();
-					} catch (InterruptedException e1) {
-						isInterrupted = true;
-					}
+				
+				try{
+					wait();
+				} catch (InterruptedException e) {
+					isInterrupted = true;
 				}
 			}
 		}

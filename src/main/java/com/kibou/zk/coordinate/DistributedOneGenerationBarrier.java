@@ -24,6 +24,7 @@ import com.kibou.zk.ZookeeperCfgConstants;
 import com.kibou.zk.ex.BrokenDistributedBarrierException;
 import com.kibou.zk.ex.DistributedBarrierException;
 import com.kibou.zk.util.ZookeeperClientFactory;
+import com.kibou.zk.util.ZooKeeperPathHelper;
 
 /**
  * 需要总协调者将传入的指定path创建好,或者说是reset (data清空)/或者是整个path删除后创建
@@ -142,7 +143,7 @@ public class DistributedOneGenerationBarrier implements Watcher, StatCallback, D
 	private List<Integer> getNodeSequences(List<String> children){
 		//System.out.println(children);
 		List<Integer> sequences = 
-				ZookeeperHelper.getNodeSequences(children,nodeName);
+				ZooKeeperPathHelper.nodeSequences(children,nodeName);
 		Collections.sort(sequences);
 		return sequences;
 	}
@@ -212,7 +213,7 @@ public class DistributedOneGenerationBarrier implements Watcher, StatCallback, D
 			nodeCreated = zk.create(zpath, String.valueOf(System.nanoTime()).getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
 			
 			//2. check where am i
-			int mySequence = ZookeeperHelper.getPathSeq(nodeCreated, zpath);
+			int mySequence = ZooKeeperPathHelper.seqOfPath(nodeCreated, zpath);
 			List<Integer> nodeSequences = getNodeSequences(zk.getChildren(zparentPath, false));
 			for(int sequence : nodeSequences){
 				if(mySequence > sequence) myIndex++;

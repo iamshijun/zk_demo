@@ -26,6 +26,7 @@ import com.kibou.zk.ZookeeperCfgConstants;
 import com.kibou.zk.ex.BrokenDistributedBarrierException;
 import com.kibou.zk.ex.DistributedBarrierException;
 import com.kibou.zk.util.ZookeeperClientFactory;
+import com.kibou.zk.util.ZooKeeperPathHelper;
 
 /**
  * 不能意识到其他节点的断开
@@ -114,7 +115,7 @@ public class DistributedOneGenerationBarrierV1 implements Watcher, StatCallback,
 	private List<Integer> getNodeSequences(List<String> children){
 		//System.out.println(children);
 		List<Integer> sequences = 
-				ZookeeperHelper.getNodeSequences(children,nodeName);
+				ZooKeeperPathHelper.nodeSequences(children,nodeName);
 		Collections.sort(sequences);
 		return sequences;
 	}
@@ -160,7 +161,7 @@ public class DistributedOneGenerationBarrierV1 implements Watcher, StatCallback,
 							myIndex = 0;
 							//check where am i
 							List<Integer> nodeSequences = getNodeSequences(zk.getChildren(zparentPath, true));
-							int mySequence = ZookeeperHelper.getPathSeq(createdPath,zpath);
+							int mySequence = ZooKeeperPathHelper.seqOfPath(createdPath,zpath);
 							for(int sequence : nodeSequences){
 								if(mySequence > sequence) myIndex++;
 							}

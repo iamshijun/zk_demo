@@ -55,6 +55,7 @@ public class ConfigurationMonitor implements Watcher, DataCallback {
 				break;
 			}
 		} else {
+			//eventType.getType == EventType.NodeDataChangeed , delete?
 			if(path != null && path.equals(znode))
 				zk.getData(znode, true, this, null);
 		}

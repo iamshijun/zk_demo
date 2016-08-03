@@ -60,7 +60,8 @@ public class DistributedFairLock implements Watcher, VoidCallback, DistributedLo
 			EventType eventType = event.getType();
 			switch (eventType){
 				case NodeChildrenChanged:
-					doNotify(); break;
+					doNotify(); 
+					break;
 				default:
 					try {
 						zk.exists(zparentNode, true);
@@ -105,12 +106,11 @@ public class DistributedFairLock implements Watcher, VoidCallback, DistributedLo
 			synchronized(this){
 				if(tryAcquire())
 					return;
-				else{
-					try {
-						wait();
-					} catch (InterruptedException e) {
-						interrupted = true;
-					}
+				
+				try {
+					wait();
+				} catch (InterruptedException e) {
+					interrupted = true;
 				}
 			}
 		}
@@ -160,15 +160,14 @@ public class DistributedFairLock implements Watcher, VoidCallback, DistributedLo
 		if(maxSeqButLessThanMe == Integer.MIN_VALUE){
 			logger.debug("get lock");
 			return true;
-		}else{
-			return false;
 		}
 		
-		}catch(InterruptedException e){
-			return false;
+		}catch(InterruptedException ignored){
+			//ignore InterrupttedException
 		}catch(KeeperException e){
 			throw new DistributedLockObtainException(e);
 		}
+		return false;
 	}
 	
 	private void selfInterrupt(){
@@ -181,11 +180,9 @@ public class DistributedFairLock implements Watcher, VoidCallback, DistributedLo
 		
 		synchronized(this){
 			while(!destroy){
-				if(tryAcquire()){
+				if(tryAcquire())
 					return;
-				}else{
-					wait();
-				}
+				wait();
 			}
 		}
 	}
@@ -213,11 +210,11 @@ public class DistributedFairLock implements Watcher, VoidCallback, DistributedLo
 				long left = timeout - (System.nanoTime() - start);
 				if(left <= 0)
 					break;
-				if(tryAcquire()){
+				
+				if(tryAcquire())
 					return true;
-				} else{
-					wait(TimeUnit.MILLISECONDS.convert(left, TimeUnit.NANOSECONDS));
-				}
+				
+				wait(TimeUnit.MILLISECONDS.convert(left, TimeUnit.NANOSECONDS));
 			}
 		}
 		return false;
